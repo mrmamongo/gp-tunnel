@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Allow the main local WebView to subscribe to backend status events.",
+  "windows": ["main"],
+  "permissions": ["core:event:default"]
+}

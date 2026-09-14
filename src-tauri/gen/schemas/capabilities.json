@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Allow the main local WebView to subscribe to backend status events.","local":true,"windows":["main"],"permissions":["core:event:default"]}}
