@@ -1,0 +1,19 @@
+# gp-relay — GlobalProtect VPN в контейнере (путь А, рекомендуемый)
+# SOCKS5 на :1080 (перепривязывается к туннелю автоматически), ssh на :2222.
+services:
+  gp-relay:
+    build: ./docker
+    image: gp-relay:latest
+    container_name: gp-relay
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    ports:
+      - "1080:1080"   # SOCKS5 (хост: docker proxy -> контейнер)
+      - "2222:22"     # ssh внутрь
+    restart: unless-stopped
+    # подключение VPN (интерактивно, OTP в терминале):
+    #   docker exec -it gp-relay openconnect --protocol=gp gp.domru.ru
+    # проверка:
+    #   curl -x socks5h://localhost:1080 -o /dev/null -w '%{http_code}\n' https://ticket.ertelecom.ru
