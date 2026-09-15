@@ -2,6 +2,32 @@
 
 Небольшое Windows-приложение на Tauri для запуска локальной headless QEMU VM и управления OpenConnect с протоколом GlobalProtect внутри неё через SSH.
 
+## Путь А (рекомендуемый) — Docker-контейнер
+
+Вместо 1.4 ГБ QEMU-образа VPN-релей теперь может жить в контейнере **61 МБ**, который тянется из публичного реестра.
+
+```bash
+docker run -d --name gp-relay --cap-add=NET_ADMIN --device=/dev/net/tun \
+  -p 1080:1080 -p 2222:22 --restart unless-stopped \
+  ghcr.io/mrmamongo/gp-relay:latest
+docker exec -it gp-relay openconnect --protocol=gp gp.domru.ru   # логин + OTP
+```
+
+Внутри: Alpine + `openconnect` (протокол GlobalProtect) + dante (SOCKS5 на `:1080`) + sshd (`:2222`). Надзиратель в `entry.sh` сам перепривязывает dante к IP туннеля, как только появится `tun0` — IP меняется от сессии к сессии, руками править не нужно.
+
+В GUI: **Настройки → Бэкенд → Docker** (по умолчанию). При подключении GUI сам проверяет/поднимает контейнер, а дальше всё как раньше — SSH-PTY, промпты логина и MFA, статусы.
+
+| | Путь Б (QEMU) | Путь А (Docker) |
+|---|---|---|
+| Вес | 1.43 ГиБ образ | 61 МБ |
+| Холодный старт | скачать/склеить/проверить образ | `docker pull` → `docker run` |
+| Менеджмент | вне процесса GUI | `docker ps`, `docker exec`, логи |
+| SOCKS | `ssh -D` из GUI | dante в контейнере напрямую |
+
+Сборка и публикация образа — workflow `.github/workflows/docker-image.yml` (пушит `ghcr.io/mrmamongo/gp-relay:latest` + sha-тег при изменениях в `docker/**`).
+
+## Путь Б (классика) — QEMU VM
+
 ## Что входит в MVP
 
 - запуск существующего загрузочного диска QEMU через WHPX;
