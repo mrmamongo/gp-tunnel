@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 mod docker;
-use docker::{docker_exec, docker_vpn_status, socks_probe};
+use docker::{
+    docker_ensure_image, docker_exec, docker_image_present, docker_vpn_status, socks_probe,
+};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::process::{Child, ChildStdin, ExitStatus, Stdio};
@@ -221,6 +223,8 @@ struct PromptPayload {
     kind: PromptKind,
     fields: Vec<PromptField>,
     message: String,
+    /// Непустой список — UI показывает выпадающий список (например, выбор шлюза).
+    choices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,6 +277,7 @@ struct InnerState {
 struct PendingPrompt {
     request_id: String,
     kind: PromptKind,
+    choices: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +286,7 @@ enum PromptKind {
     Username,
     Password,
     Mfa,
+    Gateway,
     Text,
 }
 
@@ -338,8 +344,46 @@ fn emit_log(app: &AppHandle, level: &str, message: impl Into<String>) {
     );
 }
 
+/// ASCII-поиск подстроки без учёта регистра (безопасен для UTF-8: возвращает
+/// только валидные байтовые границы исходной строки).
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
+/// Портал сам перечисляет шлюзы: "GATEWAY: [gp.domru.ru|gpm.domru.ru|gpo.domru.ru]:"
+/// Возвращаем список для выпадающего списка в UI. Парсить ответ не нужно —
+/// пользователь выбирает из того, что отдал портал.
+fn parse_gateway_choices(text: &str) -> Option<Vec<String>> {
+    let key_pos = find_ascii_ci(text, "gateway")?;
+    let rest = &text[key_pos..];
+    let open = rest.find('[')?;
+    let close = rest[open + 1..].find(']')? + open + 1;
+    let choices: Vec<String> = rest[open + 1..close]
+        .split('|')
+        .map(|item| item.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+        .filter(|item| !item.is_empty() && item.len() <= 253)
+        .collect();
+    if choices.is_empty() {
+        None
+    } else {
+        Some(choices)
+    }
+}
+
 fn detect_prompt(text: &str) -> Option<PromptKind> {
     let lower = text.to_lowercase();
+    if lower.contains("gateway:") || (lower.contains("select") && lower.contains("gateway")) {
+        // "GATEWAY: [gp.domru.ru|gpm.domru.ru|gpo.domru.ru]:" — список шлюзов,
+        // портал отдаёт его сам; выше в UI он превращается в выпадающий список.
+        if parse_gateway_choices(text).is_some() {
+            return Some(PromptKind::Gateway);
+        }
+    }
     if lower.contains("one-time")
         || lower.contains("one time")
         || lower.contains("otp")
@@ -470,6 +514,7 @@ fn prompt_label(kind: &PromptKind) -> &'static str {
         PromptKind::Username => "Имя пользователя GlobalProtect",
         PromptKind::Password => "Пароль GlobalProtect",
         PromptKind::Mfa => "Одноразовый код",
+        PromptKind::Gateway => "Шлюз GlobalProtect",
         PromptKind::Text => "Ответ сервера",
     }
 }
@@ -495,6 +540,7 @@ fn notify_prompt(
     session_id: u64,
     kind: PromptKind,
     message: String,
+    choices: Vec<String>,
 ) {
     let request_id = {
         let mut inner = match state.inner.lock() {
@@ -516,6 +562,7 @@ fn notify_prompt(
         inner.active_prompt = Some(PendingPrompt {
             request_id: id.clone(),
             kind: kind.clone(),
+            choices: choices.clone(),
         });
         id
     };
@@ -530,6 +577,7 @@ fn notify_prompt(
                 required: true,
             }],
             message,
+            choices,
         },
     );
 }
@@ -544,6 +592,7 @@ fn prompt_payload(pending: &PendingPrompt, message: String) -> PromptPayload {
             required: true,
         }],
         message,
+        choices: pending.choices.clone(),
     }
 }
 
@@ -571,7 +620,7 @@ fn schedule_prompt_fallback(
         if should_prompt {
             let message = format!("{} (резервный интерактивный запрос)", prompt_label(&kind));
             emit_log(&app, "info", message.clone());
-            notify_prompt(&app, &state, session_id, kind, message);
+            notify_prompt(&app, &state, session_id, kind, message, Vec::new());
         }
     });
 }
@@ -715,12 +764,22 @@ fn spawn_output_reader<R: Read + Send + 'static>(
                     let prompt = detect_prompt(&analysis_text);
                     let status = parse_openconnect_status(&analysis_text);
                     if let Some(kind) = prompt {
+                        let choices = if kind == PromptKind::Gateway {
+                            parse_gateway_choices(&analysis_text).unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
                         let message = if kind == PromptKind::Text {
                             text.clone()
+                        } else if kind == PromptKind::Gateway {
+                            format!(
+                                "{}: выберите шлюз из списка, который предложил портал",
+                                prompt_label(&kind)
+                            )
                         } else {
                             prompt_label(&kind).to_string()
                         };
-                        notify_prompt(&app, &state, session_id, kind, message);
+                        notify_prompt(&app, &state, session_id, kind, message, choices);
                         // Do not rediscover the previous prompt after its
                         // response clears `active_prompt`.
                         analysis_text.clear();
@@ -1271,6 +1330,7 @@ fn vpn_submit_prompt(
         PromptKind::Username => "username",
         PromptKind::Password => "password",
         PromptKind::Mfa => "mfa",
+        PromptKind::Gateway => "gateway",
         PromptKind::Text => "text",
     };
     let value = values
@@ -1337,6 +1397,8 @@ pub fn run() {
             docker_exec,
             socks_probe,
             docker_vpn_status,
+            docker_image_present,
+            docker_ensure_image,
             vpn_connect,
             vpn_status,
             vpn_disconnect,
@@ -1443,5 +1505,34 @@ mod tests {
         assert_eq!(validate_token("gp.domru.ru", "portal"), Ok(()));
         assert!(validate_token("", "portal").is_err());
         assert!(validate_token("gp.domru.ru; rm -rf /", "portal").is_err());
+    }
+
+    #[test]
+    fn parses_gateway_choice_list_from_portal_output() {
+        let output = "Portal reports GlobalProtect version 6.3.3-828; we will report the same client version.\n\
+            Portal set HIP report interval to 60 minutes).\n\
+            3 gateway servers available: gp.domru.ru (gp.domru.ru) gpm.domru.ru (gpm.domru.ru) gpo.domru.ru (gpo.domru.ru)\n\
+            Please select GlobalProtect gateway.\n\
+            GATEWAY: [gp.domru.ru|gpm.domru.ru|gpo.domru.ru]:";
+        assert_eq!(
+            parse_gateway_choices(output),
+            Some(vec![
+                "gp.domru.ru".to_string(),
+                "gpm.domru.ru".to_string(),
+                "gpo.domru.ru".to_string()
+            ])
+        );
+        assert_eq!(detect_prompt(output), Some(PromptKind::Gateway));
+    }
+
+    #[test]
+    fn gateway_parser_ignores_plain_hostname_mentions() {
+        assert_eq!(parse_gateway_choices("Connected to gp.domru.ru:443"), None);
+        assert_eq!(parse_gateway_choices("GATEWAY: [single.host]:"), Some(vec!["single.host".to_string()]));
+        // Юникод в выводе не должен ломать разбор списка.
+        assert_eq!(
+            parse_gateway_choices("Пожалуйста, выберите шлюз.\nGATEWAY: [a.example|b.example]:"),
+            Some(vec!["a.example".to_string(), "b.example".to_string()])
+        );
     }
 }

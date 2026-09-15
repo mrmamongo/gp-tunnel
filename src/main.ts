@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
 type LogLevel = 'info' | 'success' | 'warn' | 'error';
-type PromptKind = 'username' | 'password' | 'mfa' | 'text';
+type PromptKind = 'username' | 'password' | 'mfa' | 'gateway' | 'text';
 type SocksState = 'stopped' | 'starting' | 'listening' | 'stopping' | 'error';
 
 /** Настройки подключения: openconnect работает в контейнере gp-relay, поэтому
@@ -25,6 +25,8 @@ interface PromptPayload {
   fields?: Array<{ kind: PromptKind; label?: string; placeholder?: string; required?: boolean }>;
   kind?: PromptKind;
   message?: string;
+  /** Непустой список — рендерим выпадающий список (выбор шлюза GlobalProtect). */
+  choices?: string[];
   step?: number;
   totalSteps?: number;
 }
@@ -36,9 +38,10 @@ const DEFAULT_PORTAL = 'gp.domru.ru';
 /** Relay живёт в контейнере: имя образа и порты фиксированы docker-путём. */
 const DOCKER_CONTAINER = 'gp-relay';
 const DOCKER_IMAGE = 'ghcr.io/mrmamongo/gp-relay:latest';
+const DOCKER_LOCAL_TAG = 'gp-relay:latest';
 const DOCKER_SOCKS_PORT = 1080;
 
-const COMMANDS = { connect: 'vpn_connect', disconnect: 'vpn_disconnect', status: 'vpn_status', submitPrompt: 'vpn_submit_prompt', cancel: 'vpn_cancel_prompt', currentPrompt: 'vpn_current_prompt', socksStatus: 'socks_status', credentialSave: 'credential_save', credentialLoad: 'credential_load', credentialDelete: 'credential_delete', dockerExec: 'docker_exec' } as const;
+const COMMANDS = { connect: 'vpn_connect', disconnect: 'vpn_disconnect', status: 'vpn_status', submitPrompt: 'vpn_submit_prompt', cancel: 'vpn_cancel_prompt', currentPrompt: 'vpn_current_prompt', socksStatus: 'socks_status', credentialSave: 'credential_save', credentialLoad: 'credential_load', credentialDelete: 'credential_delete', dockerExec: 'docker_exec', dockerEnsureImage: 'docker_ensure_image' } as const;
 const EVENTS = { status: 'vpn://status', log: 'vpn://log', prompt: 'vpn://prompt' } as const;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -173,15 +176,22 @@ function appendLog(payload: LogPayload | string) {
 function escapeHtml(value: string): string { const node = document.createElement('span'); node.textContent = value; return node.innerHTML; }
 
 function showPrompt(payload: PromptPayload) {
-  if (activePrompt?.requestId === payload.requestId && elements.promptFields.querySelector('input')) return;
+  if (activePrompt?.requestId === payload.requestId && elements.promptFields.querySelector('input, select')) return;
   elements.promptPanel.classList.remove('is-hidden');
   const fields = payload.fields?.length ? payload.fields : [{ kind: payload.kind ?? 'text', label: payload.message ?? 'Ответ' }];
-  elements.promptFields.innerHTML = fields.map((field, index) => {
-    const id = `prompt-${index}`;
-    const type = field.kind === 'password' || field.kind === 'mfa' ? 'password' : 'text';
-    const autocomplete = field.kind === 'username' ? 'username' : 'off';
-    return `<label class="prompt-field" for="${id}"><span>${escapeHtml(field.label ?? promptLabel(field.kind))}</span><input id="${id}" name="${field.kind}" type="${type}" placeholder="${escapeHtml(field.placeholder ?? promptPlaceholder(field.kind))}" autocomplete="${autocomplete}" ${field.required === false ? '' : 'required'} /></label>`;
-  }).join('');
+  const choices = payload.choices ?? [];
+  if (choices.length) {
+    // Портал перечислил варианты (например шлюзы) — даём выбрать, а не вводить руками.
+    const field = fields[0];
+    elements.promptFields.innerHTML = `<label class="prompt-field" for="prompt-choice"><span>${escapeHtml(field.label ?? promptLabel(field.kind))}</span><select id="prompt-choice" name="${escapeHtml(field.kind)}" required>${choices.map((choice) => `<option value="${escapeHtml(choice)}">${escapeHtml(choice)}</option>`).join('')}</select></label>`;
+  } else {
+    elements.promptFields.innerHTML = fields.map((field, index) => {
+      const id = `prompt-${index}`;
+      const type = field.kind === 'password' || field.kind === 'mfa' ? 'password' : 'text';
+      const autocomplete = field.kind === 'username' ? 'username' : 'off';
+      return `<label class="prompt-field" for="${id}"><span>${escapeHtml(field.label ?? promptLabel(field.kind))}</span><input id="${id}" name="${field.kind}" type="${type}" placeholder="${escapeHtml(field.placeholder ?? promptPlaceholder(field.kind))}" autocomplete="${autocomplete}" ${field.required === false ? '' : 'required'} /></label>`;
+    }).join('');
+  }
   elements.promptTitle.textContent = payload.message ?? (fields.length > 1 ? 'Введите данные для входа' : promptLabel(fields[0].kind));
   elements.promptDescription.textContent = 'Данные передаются в openconnect внутри контейнера и удаляются после ответа.';
   elements.promptStep.textContent = payload.step && payload.totalSteps ? `${payload.step} / ${payload.totalSteps}` : 'INTERACTIVE';
@@ -193,11 +203,11 @@ function showPrompt(payload: PromptPayload) {
   elements.promptSubmit.disabled = false;
   elements.promptCancel.disabled = false;
   activePrompt = payload;
-  const firstInput = elements.promptFields.querySelector('input') as HTMLInputElement | null; firstInput?.focus();
+  const focusTarget = elements.promptFields.querySelector<HTMLElement>('input, select'); focusTarget?.focus();
 }
 
-function promptLabel(kind: PromptKind): string { return ({ username: 'Имя пользователя GlobalProtect', password: 'Пароль GlobalProtect', mfa: 'Одноразовый код', text: 'Ответ сервера' })[kind]; }
-function promptPlaceholder(kind: PromptKind): string { return ({ username: 'user', password: '••••••••', mfa: '123456', text: 'Введите ответ' })[kind]; }
+function promptLabel(kind: PromptKind): string { return ({ username: 'Имя пользователя GlobalProtect', password: 'Пароль GlobalProtect', mfa: 'Одноразовый код', gateway: 'Шлюз GlobalProtect', text: 'Ответ сервера' })[kind]; }
+function promptPlaceholder(kind: PromptKind): string { return ({ username: 'user', password: '••••••••', mfa: '123456', gateway: '', text: 'Введите ответ' })[kind]; }
 function hidePrompt() {
   activePrompt = null;
   elements.promptPanel.classList.add('is-hidden');
@@ -224,8 +234,25 @@ async function dockerContainerRunning(): Promise<boolean> {
   catch { return false; }
 }
 
+/** Образ: есть → ничего, нет → тянем из реестра, при неудаче собираем из вшитого
+ *  в exe docker-контекста (поэтому рядом с exe не нужны docker/ и compose). */
+async function dockerEnsureImage(): Promise<boolean> {
+  try {
+    const source = await invoke<string>(COMMANDS.dockerEnsureImage, { image: DOCKER_IMAGE, localTag: DOCKER_LOCAL_TAG });
+    const label = source === 'present' ? 'образ уже загружен'
+      : source === 'pulled' ? 'образ стянут из ghcr.io'
+      : 'образ собран локально из вшитого в приложение контекста';
+    appendLog({ level: 'info', message: `${DOCKER_IMAGE}: ${label}.` });
+    return true;
+  } catch (error) {
+    appendLog({ level: 'error', message: `Не удалось получить образ: ${error instanceof Error ? error.message : String(error)}` });
+    return false;
+  }
+}
+
 async function dockerEnsureContainer(): Promise<boolean> {
   if (await dockerContainerRunning()) { appendLog({ level: 'info', message: `Контейнер ${DOCKER_CONTAINER} уже работает.` }); return true; }
+  if (!await dockerEnsureImage()) return false;
   appendLog({ level: 'info', message: `Запускаю контейнер ${DOCKER_IMAGE}…` });
   try {
     await invoke(COMMANDS.dockerExec, { args: ['run', '-d', '--name', DOCKER_CONTAINER, '--cap-add', 'NET_ADMIN', '--device', '/dev/net/tun', '-p', `${DOCKER_SOCKS_PORT}:1080`, '--restart', 'unless-stopped', DOCKER_IMAGE] });
