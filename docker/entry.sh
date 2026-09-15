@@ -1,8 +1,7 @@
 #!/bin/bash
-# entry: sshd + dante всегда; надзиратель перепривязывает dante к tun0 при появлении;
-# openconnect — foreground по требованию (docker exec).
-/usr/sbin/sshd || true
-
+# entry: dante (SOCKS5) стартует сразу; надзиратель перепривязывает его к tun0,
+# как только появится туннель. openconnect запускает GUI через docker exec + socat
+# (socat даёт openconnect PTY, наружу торчит пайпами).
 mkdir -p /dev/net || true
 [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
 
@@ -27,8 +26,8 @@ sockd -D -f /etc/sockd.conf || true
 ) &
 
 if [ $# -eq 0 ]; then
-  echo "gp-relay ready: socks5 :1080 (перепривяжется к tun0), ssh :22."
-  echo "Подключение: docker exec -it gp-relay openconnect --protocol=gp gp.domru.ru"
+  echo "gp-relay ready: SOCKS5 на :1080 (перепривяжется к tun0 после подключения)."
+  echo "Подключение — из GUI (docker exec + socat + openconnect)."
   sleep infinity
 else
   exec "$@"

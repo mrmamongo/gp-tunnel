@@ -2,28 +2,32 @@
 
 ## Current status
 
-- Guest: Ubuntu Server 24.04.4 LTS, amd64, no GUI.
-- Доступность корпоративного портала из гостя проверена по HTTPS.
-- OpenConnect 9.12 установлен в тестовой VM.
-- Подключение запускается в foreground через SSH PTY; логин, пароль, OTP/passcode и выбор authgroup/gateway вводятся в GUI.
+- Relay: контейнер `gp-relay` (Alpine + openconnect + dante + sshd).
+- Доступность корпоративного портала проверена по HTTPS из контейнера.
+- OpenConnect 9.12 (Alpine package) стоит в образе `ghcr.io/mrmamongo/gp-relay:latest`.
+- Подключение запускается в foreground внутри контейнера через `docker exec` + PTY;
+  логин, пароль, OTP/passcode и выбор authgroup/gateway вводятся в GUI.
 
 ## Установка
 
 ```bash
-sudo apt update
-sudo apt install openconnect
+docker pull ghcr.io/mrmamongo/gp-relay:latest
 ```
 
-Пакет устанавливается внутри Ubuntu VM. В подготовленном образе пользователь `vpn` имеет ограниченный для этой локальной VM passwordless sudo; backend использует `sudo -n`, поэтому системный пароль не запрашивается и не смешивается с паролем VPN.
+openconnect и `vpnc-script` уже входят в образ; отдельная установка не нужна.
+При сборке образа из исходников используется `docker/Dockerfile`.
 
 ## Ручная проверка
 
 ```bash
-command -v openconnect
-openconnect --version
-sudo openconnect --protocol=gp gp.domru.ru
+docker run --rm -it --cap-add=NET_ADMIN --device=/dev/net/tun \
+  ghcr.io/mrmamongo/gp-relay:latest openconnect --version
+docker exec -it gp-relay openconnect --protocol=gp gp.domru.ru
 ```
 
-В GUI достаточно указать SSH relay и portal (`gp.domru.ru`), затем нажать «Подключить». Кнопка «Отключить» посылает `Ctrl-C` foreground-процессу OpenConnect, после чего удалённая shell-сессия закрывается.
+В GUI достаточно указать портал (`gp.domru.ru`) и нажать «Подключить»: GUI сам
+проверит и поднимет контейнер. Кнопка «Отключить» посылает `Ctrl-C`
+foreground-процессу OpenConnect внутри PTY контейнера.
 
-Подключение к корпоративному порталу не выполняется автоматически во время установки или сборки.
+Подключение к корпоративному порталу не выполняется автоматически во время
+установки или сборки.

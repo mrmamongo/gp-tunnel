@@ -11,7 +11,7 @@
       <header class="app-header">
         <div class="brand-mark" aria-hidden="true"><span>GP</span></div>
         <div class="brand-copy">
-          <p class="eyebrow">REMOTE TUNNEL</p>
+          <p class="eyebrow">DOCKER RELAY</p>
           <h1 id="app-title">GlobalProtect relay</h1>
         </div>
         <div class="header-state" id="header-state" data-state="idle">
@@ -35,7 +35,7 @@
           <div>
             <p class="eyebrow">CONNECTION STATUS</p>
             <h2 id="status-title">Готов к подключению</h2>
-            <p class="hero-subtitle" id="status-subtitle">Укажите сервер и портал, чтобы начать.</p>
+            <p class="hero-subtitle" id="status-subtitle">Укажите портал GlobalProtect, чтобы начать.</p>
           </div>
         </div>
         <button class="button button-primary button-large" id="connect-button" type="button">
@@ -49,7 +49,7 @@
           <section class="panel settings-panel" data-tab-panel="settings" aria-labelledby="settings-title">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">SSH RELAY</p>
+                <p class="eyebrow">DOCKER BACKEND</p>
                 <h2 id="settings-title">Параметры подключения</h2>
               </div>
               <span class="save-state" id="save-state">Сохранено локально</span>
@@ -57,109 +57,41 @@
             <form id="settings-form" autocomplete="off">
               <div class="form-row form-row-split">
                 <label class="field">
-                  <span>Сервер</span>
-                  <span class="field-control field-with-prefix">
-                    <span class="field-prefix" aria-hidden="true">ssh</span>
-                    <input id="server-host" name="serverHost" type="text" inputmode="url" placeholder="vpn-relay.example.com" spellcheck="false" required />
-                  </span>
-                </label>
-                <label class="field field-port">
-                  <span>Порт</span>
-                  <input id="ssh-port" name="sshPort" type="number" min="1" max="65535" placeholder="22" />
-                </label>
-              </div>
-              <div class="form-row form-row-split">
-                <label class="field">
-                  <span>SSH-пользователь</span>
-                  <input id="ssh-user" name="sshUser" type="text" placeholder="vpn" autocomplete="username" spellcheck="false" required />
-                </label>
-                <label class="field">
                   <span>GlobalProtect portal</span>
                   <input id="portal" name="portal" type="text" placeholder="portal.company.com" inputmode="url" spellcheck="false" required />
                 </label>
-              </div>
-              <div class="form-row vm-path-row">
                 <label class="field">
-                  <span>SSH identity / private key</span>
-                  <input id="identity-file" name="identityFile" type="text" placeholder="C:\\Work\\globalprotect-remote-gui\\vm\\ssh\\gp-relay_ed25519" spellcheck="false" />
+                  <span>Бэкенд</span>
+                  <span class="field-control field-with-prefix">
+                    <span class="field-prefix" aria-hidden="true">docker</span>
+                    <input id="backend-name" name="backendName" type="text" value="gp-relay · ghcr.io/mrmamongo/gp-relay:latest" readonly tabindex="-1" spellcheck="false" />
+                  </span>
                 </label>
               </div>
             </form>
-            <p class="helper-text"><span class="lock-icon" aria-hidden="true">⌁</span> Ключ хранится локально и используется для SSH; пароль и MFA вводятся только в момент запроса.</p>
+            <p class="helper-text"><span class="lock-icon" aria-hidden="true">⌁</span> Relay — это контейнер gp-relay: GUI сам поднимает его перед подключением и запускает openconnect внутри. Пароль и MFA вводятся только в момент запроса.</p>
           </section>
 
           <section class="panel socks-panel" data-tab-panel="settings" aria-labelledby="socks-title">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">LOCAL PROXY</p>
-                <h2 id="socks-title">SOCKS5 на этом компьютере</h2>
+                <p class="eyebrow">CONTAINER PROXY</p>
+                <h2 id="socks-title">SOCKS5 — dante в контейнере</h2>
               </div>
-              <span class="live-pill" id="socks-live-pill" data-state="disabled">OFF</span>
+              <span class="live-pill" id="socks-live-pill" data-state="stopped">STOPPED</span>
             </div>
-            <form id="socks-form" autocomplete="off">
-              <label class="check-row socks-toggle-row">
-                <input id="socks-enabled" name="socksEnabled" type="checkbox" checked />
-                <span class="check-box" aria-hidden="true"></span>
-                <span>Запускать прокси вместе с VPN</span>
+            <div class="form-row socks-options-row">
+              <label class="field field-port">
+                <span>Локальный порт</span>
+                <input id="socks-port-display" name="socksPortDisplay" type="number" value="1080" readonly tabindex="-1" />
               </label>
-              <div class="form-row socks-options-row">
-                <label class="field field-port">
-                  <span>Локальный порт</span>
-                  <input id="socks-port" name="socksPort" type="number" min="1" max="65535" step="1" value="1081" required />
-                </label>
-                <div class="socks-endpoint" id="socks-endpoint-row" aria-live="polite">
-                  <span class="socks-endpoint-label">Endpoint</span>
-                  <code id="socks-endpoint">socks5h://127.0.0.1:1081</code>
-                </div>
+              <div class="socks-endpoint" id="socks-endpoint-row" aria-live="polite">
+                <span class="socks-endpoint-label">Endpoint</span>
+                <code id="socks-endpoint">socks5h://127.0.0.1:1080</code>
               </div>
-            </form>
-            <p class="helper-text"><span class="lock-icon" aria-hidden="true">⌁</span> Прокси слушает только на localhost. Системный прокси Windows не меняется.</p>
-            <p class="socks-usage">Для приложений укажи <code>socks5h://127.0.0.1:1081</code>, чтобы DNS-запросы тоже шли через VPN.</p>
-          </section>
-
-          <section class="panel vm-panel" data-tab-panel="settings" aria-labelledby="vm-title">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">LOCAL HYPERVISOR</p>
-                <h2 id="vm-title">Relay VM</h2>
-              </div>
-              <span class="live-pill" id="vm-live-pill">IDLE</span>
             </div>
-            <div class="vm-status-row">
-              <span class="status-dot" id="vm-status-dot" aria-hidden="true"></span>
-              <span id="vm-status-label">Выключена</span>
-              <span class="vm-status-detail" id="vm-status-detail"></span>
-            </div>
-            <form id="vm-form" autocomplete="off">
-              <div class="form-row vm-mode-row">
-                <label class="field"><span>Бэкенд</span><select id="backend-mode" name="backendMode"><option value="docker">Docker (gp-relay контейнер)</option><option value="qemu">QEMU VM (классика)</option></select></label>
-              </div>
-              <div id="docker-backend-note" class="vm-warning" role="status" style="display:none"><span aria-hidden="true">🐳</span><span>Docker-режим: контейнер gp-relay (ghcr.io/mrmamongo/gp-relay) поднимается автоматически перед подключением. SOCKS5 — сразу из контейнера (:1080), ssh — :2222.</span></div>
-              <div class="form-row vm-mode-row qemu-only">
-                <label class="field"><span>Boot mode</span><select id="boot-mode" name="bootMode"><option value="disk">Disk image</option><option value="iso">ISO installer</option></select></label>
-              </div>
-              <div class="form-row vm-path-row">
-                <label class="field"><span>QEMU executable</span><input id="qemu-exe" name="qemuExe" type="text" placeholder="C:\\Program Files\\qemu\\qemu-system-x86_64.exe" spellcheck="false" /></label>
-              </div>
-              <div class="form-row vm-path-row" id="disk-image-row">
-                <label class="field"><span>Disk image</span><input id="disk-image" name="diskImage" type="text" placeholder="C:\\VMs\\gp-relay.qcow2" spellcheck="false" /></label>
-              </div>
-              <div class="form-row vm-path-row is-hidden" id="iso-image-row" aria-hidden="true">
-                <label class="field"><span>ISO image</span><input id="iso-image" name="isoImage" type="text" placeholder="C:\\Users\\MrMam\\Downloads\\ubuntu-24.04.4-live-server-amd64.iso" spellcheck="false" /></label>
-              </div>
-              <div class="form-row form-row-split vm-number-row">
-                <label class="field"><span>Memory (MB)</span><input id="memory-mb" name="memoryMb" type="number" min="256" step="256" placeholder="4096" /></label>
-                <label class="field"><span>CPUs</span><input id="cpus" name="cpus" type="number" min="1" max="64" step="1" placeholder="4" /></label>
-                <label class="field"><span>SSH forward</span><input id="ssh-forward-port" name="sshForwardPort" type="number" min="1" max="65535" placeholder="2222" /></label>
-              </div>
-              <label class="check-row"><input id="auto-start-vm" name="autoStartVm" type="checkbox" /><span class="check-box" aria-hidden="true"></span><span>Запускать VM автоматически перед VPN</span></label>
-              <div class="vm-actions">
-                <button class="button button-primary" id="vm-start-button" type="button"><span aria-hidden="true">▶</span> Запустить VM</button>
-                <button class="button button-ghost" id="vm-stop-button" type="button"><span aria-hidden="true">■</span> Остановить</button>
-              </div>
-              <div class="vm-warning is-hidden" id="vm-iso-warning" role="status"><span aria-hidden="true">ⓘ</span><span>ISO mode запускает VM для установки/диагностики. VPN через SSH в этом режиме не запускается.</span></div>
-            </form>
-            <p class="helper-text"><span class="lock-icon" aria-hidden="true">⌁</span> Эти параметры сохраняются локально; ключи и пароли сюда не попадают.</p>
+            <p class="helper-text"><span class="lock-icon" aria-hidden="true">⌁</span> Прокси поднимает dante внутри контейнера gp-relay и перепривязывает его к адресу туннеля. GUI порт не открывает и не закрывает, системный прокси Windows не меняется.</p>
+            <p class="socks-usage">Для приложений укажи <code>socks5h://127.0.0.1:1080</code>, чтобы DNS-запросы тоже шли через VPN.</p>
           </section>
 
           <section class="panel prompt-panel is-hidden" data-tab-panel="connection" id="prompt-panel" aria-labelledby="prompt-title" aria-live="polite">
@@ -202,36 +134,23 @@
               <span class="live-pill" id="live-pill">IDLE</span>
             </div>
             <dl class="details-list">
-              <div><dt>QEMU VM</dt><dd id="detail-vm">Выключена</dd></div>
-              <div><dt>Ubuntu SSH</dt><dd id="detail-ssh">Недоступен</dd></div>
-              <div><dt>Relay address</dt><dd id="detail-server">127.0.0.1</dd></div>
+              <div><dt>Relay</dt><dd>контейнер gp-relay</dd></div>
               <div><dt>GlobalProtect</dt><dd id="detail-state">Не подключён</dd></div>
               <div><dt>Portal</dt><dd id="detail-portal">—</dd></div>
               <div><dt>SOCKS5</dt><dd id="detail-socks">—</dd></div>
               <div><dt>Подключено</dt><dd id="detail-since">—</dd></div>
             </dl>
           </section>
-          <section class="panel ssh-access-panel" data-tab-panel="connection" aria-labelledby="ssh-access-title">
-            <div class="panel-heading panel-heading-tight">
-              <div>
-                <p class="eyebrow">DIRECT ACCESS</p>
-                <h2 id="ssh-access-title">Подключение к Ubuntu</h2>
-              </div>
-              <button class="text-button" id="copy-ssh-command" type="button">Копировать</button>
-            </div>
-            <code class="ssh-command" id="ssh-command">ssh -p 2222 vpn@127.0.0.1</code>
-            <p class="helper-text">Forward создаёт QEMU: <span id="ssh-forward-summary">127.0.0.1:2222 → VM:22</span></p>
-          </section>
           <section class="tip-card" data-tab-panel="connection">
             <span class="tip-icon" aria-hidden="true">✦</span>
             <div>
               <strong>Маленькая подсказка</strong>
-              <p>SSH остаётся транспортом. Сохранённый пароль защищается Windows DPAPI и доступен только твоему Windows-пользователю.</p>
+              <p>OpenConnect работает внутри контейнера gp-relay. Сохранённый пароль защищается Windows DPAPI и доступен только твоему Windows-пользователю.</p>
             </div>
           </section>
         </aside>
       </div>
-      <footer class="app-footer"><span>GP Relay</span><span class="footer-separator">·</span><span>SSH + MFA</span></footer>
+      <footer class="app-footer"><span>GP Relay</span><span class="footer-separator">·</span><span>Docker · MFA</span></footer>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
