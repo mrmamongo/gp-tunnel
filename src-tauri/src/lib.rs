@@ -1,5 +1,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
+mod docker;
+use docker::{docker_exec, docker_vpn_status, socks_probe};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -2862,6 +2864,9 @@ pub fn run() {
             vm_discover,
             vm_start,
             vm_stop,
+            docker_exec,
+            socks_probe,
+            docker_vpn_status,
             vpn_connect,
             vpn_status,
             vpn_disconnect,
