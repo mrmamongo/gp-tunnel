@@ -3,7 +3,7 @@
 FROM alpine:3.20
 
 RUN apk add --no-cache \
-      openconnect openssh-server dante-server shadow sudo bash \
+      openconnect openssh-server dante-server shadow sudo bash socat \
       iproute2 iptables curl ca-certificates
 
 # юзер + ssh

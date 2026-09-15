@@ -37,6 +37,8 @@ const STATUS_EVENT: &str = "session-status";
 const DEFAULT_VM_SSH_USER: &str = "vpn";
 const DEFAULT_VM_IDENTITY_FILE: &str = r"vm\ssh\gp-relay_ed25519";
 const DEFAULT_VM_KNOWN_HOSTS: &str = r"vm\ssh\known_hosts";
+/// Имя контейнера-релея: GUI поднимает его сам и в нём же запускает openconnect.
+const RELAY_CONTAINER: &str = "gp-relay";
 const GP_RELAY_VM_NAME: &str = "gp-relay";
 const GP_RELAY_VM_UUID: &str = "693e96f2-5c89-4d8c-8f3e-e384dc948042";
 const GP_RELAY_PID_FILE: &str = "gp-relay.pid";
@@ -1785,39 +1787,32 @@ fn start_connection(
         }
     }
 
-    let mut command = std::process::Command::new("ssh.exe");
+    // Docker-путь: openconnect запускается прямо в контейнере, PTY внутри даёт
+    // socat (наружу он торчит обычными пайпами — то, что нужно GUI). sshd и
+    // ssh.exe в схеме больше не участвуют.
+    let mut command = std::process::Command::new("docker");
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
     command
-        .arg("-tt")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=15")
-        .arg("-p")
-        .arg(config.port.to_string());
-    if let Some(identity_file) = config.identity_file.as_deref() {
-        command.arg("-i").arg(identity_file);
-    }
-    if let Some(known_hosts_file) = config.known_hosts_file.as_deref() {
-        command
-            .arg("-o")
-            .arg("StrictHostKeyChecking=yes")
-            .arg("-o")
-            .arg(format!("UserKnownHostsFile={known_hosts_file}"));
-    }
-    command
-        .arg(format!("{}@{}", config.ssh_user, config.host))
+        .arg("exec")
+        .arg("-i")
+        .arg(RELAY_CONTAINER)
+        .arg("socat")
+        .arg("-")
+        .arg(format!(
+            "EXEC:\"openconnect --protocol=gp {}\",pty,stderr,sane",
+            config.portal
+        ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     let mut child = command
         .spawn()
-        .map_err(|error| format!("could not start ssh.exe: {error}"))?;
-    let stdin = child.stdin.take().ok_or("ssh stdin is unavailable")?;
-    let stdout = child.stdout.take().ok_or("ssh stdout is unavailable")?;
-    let stderr = child.stderr.take().ok_or("ssh stderr is unavailable")?;
+        .map_err(|error| format!("could not start docker exec: {error}"))?;
+    let stdin = child.stdin.take().ok_or("docker stdin is unavailable")?;
+    let stdout = child.stdout.take().ok_or("docker stdout is unavailable")?;
+    let stderr = child.stderr.take().ok_or("docker stderr is unavailable")?;
     let id = state.allocate_id();
     let child = Arc::new(Mutex::new(child));
     let stdin = Arc::new(Mutex::new(stdin));
@@ -1879,21 +1874,9 @@ fn start_connection(
         child,
     );
 
-    // Keep one SSH PTY alive with openconnect in the foreground. The portal
-    // is sent over stdin, not the local ssh.exe argv. Once openconnect exits,
-    // the wrapper exits the remote shell as well.
-    if let Err(error) = write_line(&stdin, &openconnect_command(&config.portal)) {
-        if let Ok(mut inner) = state.inner.lock() {
-            if let Some(session) = inner.session.take() {
-                let _ = session
-                    .child
-                    .lock()
-                    .ok()
-                    .and_then(|mut process| process.kill().ok());
-            }
-        }
-        return Err(error);
-    }
+    // Портал уже в argv docker exec — openconnect стартует сразу в PTY контейнера,
+    // никакой команды в stdin отправлять не нужно. Всё, что печатает openconnect
+    // (запросы логина/пароля/OTP), приходит на stdout и обрабатывается как раньше.
     let running = SessionSnapshot {
         state: SessionState::Running,
         ..snapshot

@@ -387,8 +387,8 @@ async function connectFlow() {
   // Docker-режим: контейнер вместо VM, ssh на контейнерный порт.
   if (backendMode === 'docker') {
     if (!await dockerEnsureContainer()) { setState('error', 'Контейнер gp-relay не запустился, VPN не запускался.'); return; }
-    const vpnSettingsDocker = { ...settings, serverHost: '127.0.0.1', sshPort: 2222, socksPort: 1080 };
-    appendLog({ level: 'info', message: 'Подключение к контейнеру 127.0.0.1:2222 (dante SOCKS уже на :1080)…' });
+    const vpnSettingsDocker = { ...settings, serverHost: '127.0.0.1', sshPort: 2222, socksPort: 1080, socksEnabled: false };
+    appendLog({ level: 'info', message: 'openconnect запускается прямо в контейнере (docker exec + PTY). SOCKS5 уже слушает socks5h://127.0.0.1:1080 — это dante внутри контейнера, отдельно поднимать не нужно.' });
     try { await invoke(COMMANDS.connect, { settings: vpnSettingsDocker }); }
     catch (error) { setState('error'); appendLog({ level: 'error', message: error instanceof Error ? error.message : String(error) }); }
     return;
