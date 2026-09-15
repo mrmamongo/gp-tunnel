@@ -1,6 +1,6 @@
 [package]
 name = "globalprotect-remote-gui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Windows GUI controller for a remote OpenConnect GlobalProtect session"
 authors = ["GlobalProtect Remote GUI"]
 edition = "2021"

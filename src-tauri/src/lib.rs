@@ -920,36 +920,84 @@ fn spawn_waiter(app: AppHandle, state: AppState, session_id: u64, child: Arc<Mut
 
 fn spawn_disconnect_cleanup(app: AppHandle, child: Arc<Mutex<Child>>, session_id: u64) {
     thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let exited = child
+        let exited = |child: &Arc<Mutex<Child>>| {
+            child
                 .lock()
                 .ok()
                 .and_then(|mut process| process.try_wait().ok())
                 .flatten()
-                .is_some();
-            if exited {
-                return;
-            }
-            if Instant::now() >= deadline {
-                if let Ok(mut process) = child.lock() {
-                    if let Err(error) = process.kill() {
-                        emit_log(
-                            &app,
-                            "error",
-                            format!("Не удалось завершить docker exec после Ctrl-C: {error}"),
-                        );
-                    } else {
-                        emit_log(
-                            &app,
-                            "warn",
-                            format!("Сеанс {session_id} принудительно завершён после Ctrl-C"),
-                        );
-                    }
+                .is_some()
+        };
+        let wait_until = |child: &Arc<Mutex<Child>>, budget: Duration| -> bool {
+            let deadline = Instant::now() + budget;
+            loop {
+                if exited(child) {
+                    return true;
                 }
-                return;
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(150));
             }
-            thread::sleep(Duration::from_millis(100));
+        };
+
+        // 1. Ctrl-C (ETX в PTY контейнера) — самый быстрый и аккуратный путь:
+        // openconnect получает SIGINT и сам закрывает сессию на шлюзе.
+        if wait_until(&child, Duration::from_secs(3)) {
+            return;
+        }
+        emit_log(
+            &app,
+            "info",
+            "Ctrl-C не завершил openconnect — останавливаю его изнутри контейнера (SIGINT)."
+                .to_string(),
+        );
+        let _ = docker_exec(vec![
+            "exec".into(),
+            RELAY_CONTAINER.into(),
+            "pkill".into(),
+            "-INT".into(),
+            "-x".into(),
+            "openconnect".into(),
+        ]);
+        if wait_until(&child, Duration::from_secs(4)) {
+            return;
+        }
+
+        // 2. Гарантированный путь: контейнер — расходник. Сносим его целиком,
+        // следующее подключение поднимет новый из того же образа.
+        emit_log(
+            &app,
+            "warn",
+            format!(
+                "openconnect не завершился — сношу контейнер {RELAY_CONTAINER} \
+                 (при следующем подключении он будет создан заново)."
+            ),
+        );
+        let _ = docker_exec(vec![
+            "rm".into(),
+            "-f".into(),
+            RELAY_CONTAINER.into(),
+        ]);
+        if wait_until(&child, Duration::from_secs(5)) {
+            return;
+        }
+
+        // 3. Последний резерв — прибить локальный процесс docker.exe.
+        if let Ok(mut process) = child.lock() {
+            if let Err(error) = process.kill() {
+                emit_log(
+                    &app,
+                    "error",
+                    format!("Не удалось завершить docker exec после сноса контейнера: {error}"),
+                );
+            } else {
+                emit_log(
+                    &app,
+                    "warn",
+                    format!("Сеанс {session_id} принудительно завершён после сноса контейнера"),
+                );
+            }
         }
     });
 }
@@ -1000,7 +1048,9 @@ fn start_connection(
         .arg("socat")
         .arg("-")
         .arg(format!(
-            "EXEC:\"openconnect --protocol=gp {}\",pty,stderr,sane",
+            // setsid+ctty делают PTY управляющим терминалом openconnect, иначе
+            // Ctrl-C (ETX) не превращается в SIGINT и отключение не срабатывает.
+            "EXEC:\"openconnect --protocol=gp {}\",pty,stderr,setsid,ctty,sigint,sane",
             config.portal
         ))
         .stdin(Stdio::piped())
