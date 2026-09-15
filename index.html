@@ -132,6 +132,10 @@
             </div>
             <form id="vm-form" autocomplete="off">
               <div class="form-row vm-mode-row">
+                <label class="field"><span>Бэкенд</span><select id="backend-mode" name="backendMode"><option value="docker">Docker (gp-relay контейнер)</option><option value="qemu">QEMU VM (классика)</option></select></label>
+              </div>
+              <div id="docker-backend-note" class="vm-warning" role="status" style="display:none"><span aria-hidden="true">🐳</span><span>Docker-режим: контейнер gp-relay (ghcr.io/mrmamongo/gp-relay) поднимается автоматически перед подключением. SOCKS5 — сразу из контейнера (:1080), ssh — :2222.</span></div>
+              <div class="form-row vm-mode-row qemu-only">
                 <label class="field"><span>Boot mode</span><select id="boot-mode" name="bootMode"><option value="disk">Disk image</option><option value="iso">ISO installer</option></select></label>
               </div>
               <div class="form-row vm-path-row">

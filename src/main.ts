@@ -50,7 +50,7 @@ interface VmStatusPayload { state: VmState; pid?: number; sshForwardPort?: numbe
 interface SavedCredential { username: string; password: string; }
 
 const STORAGE_KEY = 'gp-relay.connection-settings.v1';
-const COMMANDS = { connect: 'vpn_connect', disconnect: 'vpn_disconnect', status: 'vpn_status', submitPrompt: 'vpn_submit_prompt', cancel: 'vpn_cancel_prompt', currentPrompt: 'vpn_current_prompt', vmStatus: 'vm_status', vmDiscover: 'vm_discover', vmStart: 'vm_start', vmStop: 'vm_stop', socksStatus: 'socks_status', credentialSave: 'credential_save', credentialLoad: 'credential_load', credentialDelete: 'credential_delete' } as const;
+const COMMANDS = { connect: 'vpn_connect', disconnect: 'vpn_disconnect', status: 'vpn_status', submitPrompt: 'vpn_submit_prompt', cancel: 'vpn_cancel_prompt', currentPrompt: 'vpn_current_prompt', vmStatus: 'vm_status', vmDiscover: 'vm_discover', vmStart: 'vm_start', vmStop: 'vm_stop', socksStatus: 'socks_status', credentialSave: 'credential_save', credentialLoad: 'credential_load', credentialDelete: 'credential_delete', dockerExec: 'docker_exec', socksProbe: 'socks_probe' } as const;
 const EVENTS = { status: 'vpn://status', log: 'vpn://log', prompt: 'vpn://prompt', vmStatus: 'vm://status', socksStatus: 'socks://status' } as const;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -203,6 +203,16 @@ function updateBootModeUi() {
   if (isoMode) elements.autoStartVm.checked = false;
 }
 
+function updateBackendModeUi() {
+  const docker = backendMode === 'docker';
+  const note = document.getElementById('docker-backend-note');
+  if (note) note.style.display = docker ? '' : 'none';
+  document.querySelectorAll<HTMLElement>('.qemu-only').forEach((el) => {
+    el.classList.toggle('is-hidden', docker);
+    el.setAttribute('aria-hidden', String(docker));
+  });
+}
+
 function setState(next: ConnectionState, message?: string) {
   state = next;
   elements.headerState.dataset.state = next;
@@ -338,6 +348,30 @@ async function connect() {
   finally { connectionOrchestrationActive = false; }
 }
 
+// ——— Docker-бэкенд (путь А): контейнер gp-relay вместо qemu VM ———
+// Бэкенд-режим хранится в настройках; при docker автозапуск VM заменяется на ensureContainer.
+type BackendMode = 'docker' | 'qemu';
+let backendMode: BackendMode = (() => { try { return (localStorage.getItem('gp-relay.backend') as BackendMode) || 'docker'; } catch { return 'docker'; } })();
+function setBackendMode(mode: BackendMode) { backendMode = mode; try { localStorage.setItem('gp-relay.backend', mode); } catch { /* ок */ } }
+
+const DOCKER_CONTAINER = 'gp-relay';
+const DOCKER_IMAGE = 'ghcr.io/mrmamongo/gp-relay:latest';
+
+async function dockerContainerRunning(): Promise<boolean> {
+  try { const out = await invoke<string>(COMMANDS.dockerExec, { args: ['inspect', '-f', '{{.State.Running}}', DOCKER_CONTAINER] }); return out.trim() === 'true'; }
+  catch { return false; }
+}
+
+async function dockerEnsureContainer(): Promise<boolean> {
+  if (await dockerContainerRunning()) { appendLog({ level: 'info', message: `Контейнер ${DOCKER_CONTAINER} уже работает.` }); return true; }
+  appendLog({ level: 'info', message: `Запускаю контейнер ${DOCKER_IMAGE}…` });
+  try {
+    await invoke(COMMANDS.dockerExec, { args: ['run', '-d', '--name', DOCKER_CONTAINER, '--cap-add', 'NET_ADMIN', '--device', '/dev/net/tun', '-p', '1080:1080', '-p', '2222:22', '--restart', 'unless-stopped', DOCKER_IMAGE] });
+    appendLog({ level: 'success', message: 'Контейнер gp-relay запущен (socks :1080, ssh :2222).' });
+    return true;
+  } catch (error) { appendLog({ level: 'error', message: `Не удалось запустить контейнер: ${error instanceof Error ? error.message : String(error)}` }); return false; }
+}
+
 async function connectFlow() {
   if (state === 'connected') return disconnect();
   if (!elements.settingsForm.reportValidity()) return;
@@ -349,6 +383,15 @@ async function connectFlow() {
   } else {
     setSocksStatus({ state: 'disabled' });
     appendLog({ level: 'info', message: 'Локальный SOCKS5 отключён в настройках.' });
+  }
+  // Docker-режим: контейнер вместо VM, ssh на контейнерный порт.
+  if (backendMode === 'docker') {
+    if (!await dockerEnsureContainer()) { setState('error', 'Контейнер gp-relay не запустился, VPN не запускался.'); return; }
+    const vpnSettingsDocker = { ...settings, serverHost: '127.0.0.1', sshPort: 2222, socksPort: 1080 };
+    appendLog({ level: 'info', message: 'Подключение к контейнеру 127.0.0.1:2222 (dante SOCKS уже на :1080)…' });
+    try { await invoke(COMMANDS.connect, { settings: vpnSettingsDocker }); }
+    catch (error) { setState('error'); appendLog({ level: 'error', message: error instanceof Error ? error.message : String(error) }); }
+    return;
   }
   if (settings.vm.bootMode === 'iso') {
     setState('idle', 'ISO-режим предназначен только для запуска установщика Ubuntu.');
@@ -509,6 +552,12 @@ async function setupBridge() {
 
 applySettings(readSettings());
 updateBootModeUi();
+updateBackendModeUi();
+const backendSelect = document.getElementById('backend-mode') as HTMLSelectElement | null;
+if (backendSelect) {
+  backendSelect.value = backendMode;
+  backendSelect.addEventListener('change', () => { setBackendMode(backendSelect.value as BackendMode); updateBackendModeUi(); });
+}
 updateSocksUi();
 updateSshAccess();
 setState('idle');
