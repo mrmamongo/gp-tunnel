@@ -44,7 +44,8 @@ jobs:
 
       - name: Build portable kit (single exe + README + checksums)
         shell: pwsh
-        run: .\tools\build-portable-docker.ps1 -Zip
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\build-portable.ps1" -Zip
 
       - name: Upload installer + portable kit
         uses: actions/upload-artifact@v4
