@@ -11,7 +11,7 @@ services:
     devices:
       - /dev/net/tun
     ports:
-      - "1080:1080"   # SOCKS5 (хост -> dante в контейнере)
+      - "127.0.0.1:1080:1080"   # SOCKS5 доступен только локально
     restart: unless-stopped
     # ручное подключение VPN (интерактивно, OTP в терминале):
     #   docker exec -i gp-relay socat - 'EXEC:"openconnect --protocol=gp gp.domru.ru",pty,stderr,sane'

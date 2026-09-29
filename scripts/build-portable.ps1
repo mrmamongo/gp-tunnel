@@ -6,7 +6,8 @@ param(
     [switch]$Zip
 )
 
-# Portable-комплект: ТОЛЬКО exe. Docker-контекст (Dockerfile/dante.conf/entry.sh)
+# Portable-комплект: exe и DLL среды выполнения, если они есть рядом со сборкой.
+# Docker-контекст (Dockerfile/dante.conf/entry.sh)
 # вшит в бинарь, образ тянется из ghcr.io, а если реестр недоступен — собирается
 # из вшитого контекста. Никаких docker-compose.yml и каталогов-спутников.
 
@@ -29,11 +30,16 @@ $portableRoot = Join-Path ([System.IO.Path]::GetFullPath($OutputRoot)) "gp-relay
 New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
 
 Copy-Item -LiteralPath $appSource -Destination (Join-Path $portableRoot 'GP Relay.exe')
+$runtimeFiles = Get-ChildItem -LiteralPath (Split-Path -Parent $appSource) -Filter '*.dll' -File
+foreach ($runtimeFile in $runtimeFiles) {
+    Copy-Item -LiteralPath $runtimeFile.FullName -Destination $portableRoot
+}
 
 @"
 GP Relay portable for Windows x64
 
-Single file: GP Relay.exe  (no installer, no docker/ folder, no compose file)
+Run GP Relay.exe. Keep any included DLL files beside it.
+No installer, docker/ folder or compose file is needed.
 
 Requirements
   Docker Desktop (running). WebView2 Runtime is preinstalled on Windows 11.
@@ -43,14 +49,17 @@ What it does on first Connect
   2. otherwise the image $Image is pulled from the registry;
   3. if the registry is unreachable, the image is built on the spot from the
      docker context embedded inside this exe (Dockerfile + dante.conf + entry.sh);
-  4. the container starts (NET_ADMIN + /dev/net/tun + SOCKS5 on 127.0.0.1:1080);
+  4. the container starts (NET_ADMIN + /dev/net/tun + SOCKS5 on the chosen localhost port);
   5. openconnect runs inside it (docker exec + socat PTY) and asks for
      login / password / MFA / gateway selection directly in the GUI window.
 
 Result
-  SOCKS5 proxy: socks5h://127.0.0.1:1080  (dante inside the container)
+  SOCKS5 proxy: socks5h://127.0.0.1:<port> (default: 1080)
 
 Notes
+  - Starts in the system tray. Left click opens the compact connection panel.
+  - Hiding the panel keeps VPN running. Right click > Exit disconnects VPN.
+  - Host, username and port are remembered; optional password storage uses DPAPI.
   - Image size ~63 MB; no QEMU and no VM image are involved.
   - No SSH anywhere: the GUI talks to the container directly.
   - dante re-binds to the tunnel IP automatically once openconnect is up.

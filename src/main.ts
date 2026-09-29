@@ -1,379 +1,192 @@
 import './styles.css';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen } from '@tauri-apps/api/event';
+import { version } from '../package.json';
 
-type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
-type LogLevel = 'info' | 'success' | 'warn' | 'error';
-type PromptKind = 'username' | 'password' | 'mfa' | 'gateway' | 'text';
-type SocksState = 'stopped' | 'starting' | 'listening' | 'stopping' | 'error';
-
-/** Настройки подключения: openconnect работает в контейнере gp-relay, поэтому
- *  от пользователя нужен только портал GlobalProtect. */
-interface ConnectionSettings { portal: string; }
-
-interface StatusPayload {
-  state: ConnectionState;
-  message?: string;
-  portal?: string;
-  connectedAt?: string | null;
-}
-
-interface LogPayload { level?: LogLevel; message: string; timestamp?: string; }
-interface SocksStatusPayload { state?: string; port?: number; endpoint?: string; message?: string; error?: string; }
-interface PromptPayload {
-  requestId: string;
-  fields?: Array<{ kind: PromptKind; label?: string; placeholder?: string; required?: boolean }>;
-  kind?: PromptKind;
-  message?: string;
-  /** Непустой список — рендерим выпадающий список (выбор шлюза GlobalProtect). */
-  choices?: string[];
-  step?: number;
-  totalSteps?: number;
-}
-
-interface SavedCredential { username: string; password: string; }
-
-const STORAGE_KEY = 'gp-relay.connection-settings.v1';
-const DEFAULT_PORTAL = 'gp.domru.ru';
-/** Relay живёт в контейнере: имя образа и порты фиксированы docker-путём. */
-const DOCKER_CONTAINER = 'gp-relay';
-const DOCKER_IMAGE = 'ghcr.io/mrmamongo/gp-relay:latest';
-const DOCKER_LOCAL_TAG = 'gp-relay:latest';
-const DOCKER_SOCKS_PORT = 1080;
-
-const COMMANDS = { connect: 'vpn_connect', disconnect: 'vpn_disconnect', status: 'vpn_status', submitPrompt: 'vpn_submit_prompt', cancel: 'vpn_cancel_prompt', currentPrompt: 'vpn_current_prompt', socksStatus: 'socks_status', credentialSave: 'credential_save', credentialLoad: 'credential_load', credentialDelete: 'credential_delete', dockerExec: 'docker_exec', dockerEnsureImage: 'docker_ensure_image' } as const;
-const EVENTS = { status: 'vpn://status', log: 'vpn://log', prompt: 'vpn://prompt' } as const;
-
+type PromptKind = 'username' | 'password' | 'mfa' | 'challenge' | 'gateway' | 'text';
+interface Prompt { requestId: string; kind: PromptKind; message: string; choices: string[]; }
+interface Snapshot { revision: number; state: string; message: string; active: boolean; cleanupRequired: boolean; portal: string; socksPort: number; prompt: Prompt | null; }
+interface Settings { portal: string; username: string; socksPort: number; }
+interface Credential { portal?: string | null; username: string; password: string; }
+const KEY = 'gp-relay.connection-settings.v1';
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const elements = {
-  shell: $('app-shell'), tabConnection: $('tab-connection') as HTMLButtonElement, tabSettings: $('tab-settings') as HTMLButtonElement,
-  headerState: $('header-state'), headerLabel: $('header-state-label'), orb: $('connection-orb'),
-  statusTitle: $('status-title'), statusSubtitle: $('status-subtitle'), connect: $('connect-button') as HTMLButtonElement,
-  settingsForm: $('settings-form') as HTMLFormElement, portal: $('portal') as HTMLInputElement, saveState: $('save-state'),
-  socksLivePill: $('socks-live-pill'), socksEndpointRow: $('socks-endpoint-row'), socksEndpoint: $('socks-endpoint'), detailSocks: $('detail-socks'),
-  promptPanel: $('prompt-panel'), promptTitle: $('prompt-title'), promptDescription: $('prompt-description'), promptStep: $('prompt-step'),
-  promptForm: $('prompt-form') as HTMLFormElement, promptFields: $('prompt-fields'), promptSubmit: $('prompt-submit') as HTMLButtonElement,
-  promptCancel: $('prompt-cancel') as HTMLButtonElement, rememberCredentials: $('remember-credentials') as HTMLInputElement,
-  log: $('log'), logEmpty: $('log-empty'), clearLog: $('clear-log') as HTMLButtonElement,
-  livePill: $('live-pill'), detailState: $('detail-state'), detailPortal: $('detail-portal'), detailSince: $('detail-since'),
+$('app-version').textContent = version;
+const ui = {
+  panel: $('panel'), form: $<HTMLFormElement>('connection-form'), settings: $<HTMLFieldSetElement>('settings'),
+  username: $<HTMLInputElement>('username'), password: $<HTMLInputElement>('password'),
+  port: $<HTMLInputElement>('socks-port'), remember: $<HTMLInputElement>('remember'), reveal: $<HTMLButtonElement>('toggle-password'),
+  status: $('status'), statusText: $('status-text'), error: $('error'), connect: $<HTMLButtonElement>('connect'),
+  challenge: $('challenge'), challengeLabel: $('challenge-label'), responseControl: $('response-control'), cancel: $<HTMLButtonElement>('cancel-connection'),
 };
-
-let state: ConnectionState = 'idle';
-let socksState: SocksState = 'stopped';
-let activePrompt: PromptPayload | null = null;
-let connectedAt: string | null = null;
-let unlisteners: UnlistenFn[] = [];
-let promptPollTimer: number | null = null;
-let statusPollTimer: number | null = null;
-let socksPollTimer: number | null = null;
-let savedCredential: SavedCredential | null = null;
-let currentGpUsername = '';
-let currentGpPassword = '';
-let connectionOrchestrationActive = false;
-
-type AppTab = 'connection' | 'settings';
-
-function setActiveTab(tab: AppTab) {
-  elements.shell.dataset.tab = tab;
-  elements.tabConnection.classList.toggle('is-active', tab === 'connection');
-  elements.tabSettings.classList.toggle('is-active', tab === 'settings');
-  elements.tabConnection.setAttribute('aria-selected', String(tab === 'connection'));
-  elements.tabSettings.setAttribute('aria-selected', String(tab === 'settings'));
-}
-
-const stateLabels: Record<ConnectionState, string> = { idle: 'Не подключён', connecting: 'Подключение…', connected: 'Подключён', disconnecting: 'Отключение…', error: 'Ошибка' };
-const stateTitles: Record<ConnectionState, string> = { idle: 'Готов к подключению', connecting: 'Устанавливаем туннель', connected: 'Туннель активен', disconnecting: 'Закрываем туннель', error: 'Не удалось подключиться' };
-const socksStateLabels: Record<SocksState, string> = { stopped: 'Остановлен', starting: 'Запускается…', listening: 'Слушает', stopping: 'Останавливается…', error: 'Ошибка прокси' };
-
-function readSettings(): ConnectionSettings {
+let snapshot: Snapshot = { revision: -1, state: 'idle', message: 'Не подключён', active: false, cleanupRequired: false, portal: '', socksPort: 1080, prompt: null };
+let ready = false;
+let busy = false;
+let promptId: string | null = null;
+let submittedPrompt: string | null = null;
+let infoOpen = false;
+let socksCheck = false;
+let statusCheck = false;
+function readSettings(): Settings {
+  const defaults = { portal: 'gp.domru.ru', username: '', socksPort: 1080 };
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const saved = JSON.parse(raw) as Partial<ConnectionSettings>;
-      return { portal: saved.portal?.trim() || DEFAULT_PORTAL };
-    }
-  } catch { /* localStorage may be disabled in a WebView */ }
-  return { portal: DEFAULT_PORTAL };
+    const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
+    return { portal: typeof saved.portal === 'string' && saved.portal.trim() ? saved.portal.trim() : defaults.portal,
+      username: typeof saved.username === 'string' ? saved.username : '',
+      socksPort: Number.isInteger(saved.socksPort) && saved.socksPort > 0 && saved.socksPort <= 65535 ? saved.socksPort : 1080 };
+  } catch { return defaults; }
 }
-
-function currentSettings(): ConnectionSettings {
-  return { portal: elements.portal.value.trim() || DEFAULT_PORTAL };
-}
-
 function saveSettings() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(currentSettings())); elements.saveState.textContent = 'Сохранено локально'; } catch { elements.saveState.textContent = 'Только на этот запуск'; }
+  const next: Settings = { portal: settings.portal, username: ui.username.value.trim(), socksPort: Number(ui.port.value) };
+  try { localStorage.setItem(KEY, JSON.stringify(next)); } catch { /* still usable for this launch */ }
 }
-
-function applySettings(settings: ConnectionSettings) {
-  elements.portal.value = settings.portal;
-}
-
-function setState(next: ConnectionState, message?: string) {
-  state = next;
-  elements.headerState.dataset.state = next;
-  elements.orb.dataset.state = next;
-  elements.livePill.dataset.state = next;
-  elements.livePill.textContent = next.toUpperCase();
-  elements.headerLabel.textContent = stateLabels[next];
-  elements.statusTitle.textContent = stateTitles[next];
-  elements.statusSubtitle.textContent = message ?? (next === 'connected' ? 'Трафик проходит через контейнер gp-relay.' : next === 'error' ? 'Проверьте параметры и журнал сеанса.' : 'Укажите портал GlobalProtect, чтобы начать.');
-  elements.detailState.textContent = stateLabels[next];
-  elements.connect.disabled = next === 'connecting' || next === 'disconnecting';
-  elements.connect.innerHTML = next === 'connected' ? '<span class="button-icon" aria-hidden="true">×</span> Отключить' : '<span class="button-icon" aria-hidden="true">↗</span> Подключить';
-  if (next === 'connected') connectedAt = connectedAt ?? new Date().toISOString();
-  if (next === 'idle' || next === 'error') connectedAt = null;
-  elements.detailSince.textContent = connectedAt ? formatDate(connectedAt) : '—';
-}
-
-function socksEndpoint(port = DOCKER_SOCKS_PORT): string {
-  return `socks5h://127.0.0.1:${port}`;
-}
-
-function setSocksStatus(payload: SocksStatusPayload = {}) {
-  const rawState = payload.state?.toLowerCase();
-  const next: SocksState = rawState === 'listening' || rawState === 'running' || rawState === 'connected'
-    ? 'listening'
-    : rawState === 'starting' || rawState === 'connecting'
-      ? 'starting'
-      : rawState === 'stopping' || rawState === 'disconnecting'
-        ? 'stopping'
-        : rawState === 'error' || rawState === 'failed'
-          ? 'error'
-          : 'stopped';
-  socksState = next;
-  elements.socksLivePill.dataset.state = next;
-  elements.socksLivePill.textContent = next === 'listening' ? 'LISTENING' : next.toUpperCase();
-  const port = payload.port && payload.port > 0 ? payload.port : DOCKER_SOCKS_PORT;
-  const endpoint = payload.endpoint || socksEndpoint(port);
-  elements.socksEndpoint.textContent = endpoint;
-  elements.detailSocks.textContent = next === 'listening' ? `${endpoint} · dante в контейнере` : socksStateLabels[next];
-  const note = payload.message || payload.error;
-  if (note) elements.socksEndpointRow.dataset.message = note;
-  else delete elements.socksEndpointRow.dataset.message;
-}
-
-/** SOCKS5 поднимает dante внутри контейнера gp-relay — GUI только отражает статус. */
-async function refreshSocksStatus() {
-  try {
-    const payload = await invoke<SocksStatusPayload>(COMMANDS.socksStatus);
-    setSocksStatus(payload);
-  } catch {
-    setSocksStatus({ state: 'stopped' });
-  }
-}
-
-function formatDate(value: string): string { const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
-
-function appendLog(payload: LogPayload | string) {
-  const entry: LogPayload = typeof payload === 'string' ? { message: payload } : payload;
-  elements.logEmpty?.remove();
-  const row = document.createElement('div'); row.className = 'log-line'; row.dataset.level = entry.level ?? 'info';
-  const time = entry.timestamp ? formatDate(entry.timestamp) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  row.innerHTML = `<span class="log-time">${escapeHtml(time)}</span><span class="log-level">${(entry.level ?? 'info').toUpperCase()}</span><span class="log-message">${escapeHtml(entry.message)}</span>`;
-  elements.log.append(row); elements.log.scrollTop = elements.log.scrollHeight;
-}
-
-function escapeHtml(value: string): string { const node = document.createElement('span'); node.textContent = value; return node.innerHTML; }
-
-function showPrompt(payload: PromptPayload) {
-  if (activePrompt?.requestId === payload.requestId && elements.promptFields.querySelector('input, select')) return;
-  elements.promptPanel.classList.remove('is-hidden');
-  const fields = payload.fields?.length ? payload.fields : [{ kind: payload.kind ?? 'text', label: payload.message ?? 'Ответ' }];
-  const choices = payload.choices ?? [];
-  if (choices.length) {
-    // Портал перечислил варианты (например шлюзы) — даём выбрать, а не вводить руками.
-    const field = fields[0];
-    elements.promptFields.innerHTML = `<label class="prompt-field" for="prompt-choice"><span>${escapeHtml(field.label ?? promptLabel(field.kind))}</span><select id="prompt-choice" name="${escapeHtml(field.kind)}" required>${choices.map((choice) => `<option value="${escapeHtml(choice)}">${escapeHtml(choice)}</option>`).join('')}</select></label>`;
-  } else {
-    elements.promptFields.innerHTML = fields.map((field, index) => {
-      const id = `prompt-${index}`;
-      const type = field.kind === 'password' || field.kind === 'mfa' ? 'password' : 'text';
-      const autocomplete = field.kind === 'username' ? 'username' : 'off';
-      return `<label class="prompt-field" for="${id}"><span>${escapeHtml(field.label ?? promptLabel(field.kind))}</span><input id="${id}" name="${field.kind}" type="${type}" placeholder="${escapeHtml(field.placeholder ?? promptPlaceholder(field.kind))}" autocomplete="${autocomplete}" ${field.required === false ? '' : 'required'} /></label>`;
-    }).join('');
-  }
-  elements.promptTitle.textContent = payload.message ?? (fields.length > 1 ? 'Введите данные для входа' : promptLabel(fields[0].kind));
-  elements.promptDescription.textContent = 'Данные передаются в openconnect внутри контейнера и удаляются после ответа.';
-  elements.promptStep.textContent = payload.step && payload.totalSteps ? `${payload.step} / ${payload.totalSteps}` : 'INTERACTIVE';
-  for (const input of elements.promptFields.querySelectorAll<HTMLInputElement>('input')) {
-    if (input.name === 'username') input.value = savedCredential?.username || currentGpUsername;
-    if (input.name === 'password') input.value = savedCredential?.password || currentGpPassword;
-  }
-  elements.rememberCredentials.checked = savedCredential !== null;
-  elements.promptSubmit.disabled = false;
-  elements.promptCancel.disabled = false;
-  activePrompt = payload;
-  const focusTarget = elements.promptFields.querySelector<HTMLElement>('input, select'); focusTarget?.focus();
-}
-
-function promptLabel(kind: PromptKind): string { return ({ username: 'Имя пользователя GlobalProtect', password: 'Пароль GlobalProtect', mfa: 'Одноразовый код', gateway: 'Шлюз GlobalProtect', text: 'Ответ сервера' })[kind]; }
-function promptPlaceholder(kind: PromptKind): string { return ({ username: 'user', password: '••••••••', mfa: '123456', gateway: '', text: 'Введите ответ' })[kind]; }
-function hidePrompt() {
-  activePrompt = null;
-  elements.promptPanel.classList.add('is-hidden');
-  elements.promptTitle.textContent = 'Ожидаю запрос OpenConnect';
-  elements.promptDescription.textContent = 'Когда сервер запросит логин, пароль, OTP или challenge, поле появится здесь.';
-  elements.promptStep.textContent = 'WAITING';
-  elements.promptFields.innerHTML = '<p class="auth-waiting">Сейчас ввод не требуется. Состояние запроса проверяется каждые 500 мс.</p>';
-  elements.promptSubmit.disabled = true;
-  elements.promptCancel.disabled = true;
-}
-
-async function connect() {
-  if (connectionOrchestrationActive) return;
-  connectionOrchestrationActive = true;
-  try { await connectFlow(); }
-  finally { connectionOrchestrationActive = false; }
-}
-
-// ——— Docker-путь: контейнер gp-relay, openconnect внутри него ———
-// GUI поднимает контейнер (если он ещё не работает) и ведёт сессию через
-// docker exec. SOCKS5 даёт dante в контейнере, ssh.exe/QEMU не участвуют.
-async function dockerContainerRunning(): Promise<boolean> {
-  try { const out = await invoke<string>(COMMANDS.dockerExec, { args: ['inspect', '-f', '{{.State.Running}}', DOCKER_CONTAINER] }); return out.trim() === 'true'; }
-  catch { return false; }
-}
-
-/** Образ: есть → ничего, нет → тянем из реестра, при неудаче собираем из вшитого
- *  в exe docker-контекста (поэтому рядом с exe не нужны docker/ и compose). */
-async function dockerEnsureImage(): Promise<boolean> {
-  try {
-    const source = await invoke<string>(COMMANDS.dockerEnsureImage, { image: DOCKER_IMAGE, localTag: DOCKER_LOCAL_TAG });
-    const label = source === 'present' ? 'образ уже загружен'
-      : source === 'pulled' ? 'образ стянут из ghcr.io'
-      : 'образ собран локально из вшитого в приложение контекста';
-    appendLog({ level: 'info', message: `${DOCKER_IMAGE}: ${label}.` });
-    return true;
-  } catch (error) {
-    appendLog({ level: 'error', message: `Не удалось получить образ: ${error instanceof Error ? error.message : String(error)}` });
-    return false;
-  }
-}
-
-async function dockerEnsureContainer(): Promise<boolean> {
-  if (await dockerContainerRunning()) { appendLog({ level: 'info', message: `Контейнер ${DOCKER_CONTAINER} уже работает.` }); return true; }
-  if (!await dockerEnsureImage()) return false;
-  appendLog({ level: 'info', message: `Запускаю контейнер ${DOCKER_IMAGE}…` });
-  try {
-    await invoke(COMMANDS.dockerExec, { args: ['run', '-d', '--name', DOCKER_CONTAINER, '--cap-add', 'NET_ADMIN', '--device', '/dev/net/tun', '-p', `${DOCKER_SOCKS_PORT}:1080`, '--restart', 'unless-stopped', DOCKER_IMAGE] });
-    appendLog({ level: 'success', message: `Контейнер gp-relay запущен (SOCKS5 :${DOCKER_SOCKS_PORT}).` });
-    return true;
-  } catch (error) { appendLog({ level: 'error', message: `Не удалось запустить контейнер: ${error instanceof Error ? error.message : String(error)}` }); return false; }
-}
-
-async function connectFlow() {
-  if (state === 'connected') return disconnect();
-  if (!elements.settingsForm.reportValidity()) return;
-  const settings = currentSettings(); saveSettings(); setActiveTab('connection'); setState('connecting');
-  if (!await dockerEnsureContainer()) { setState('error', 'Контейнер gp-relay не запустился, VPN не запускался.'); return; }
-  appendLog({ level: 'info', message: `Подключаюсь к порталу ${settings.portal} через контейнер ${DOCKER_CONTAINER}…` });
-  appendLog({ level: 'info', message: `openconnect запускается прямо в контейнере (docker exec + PTY). SOCKS5 слушает ${socksEndpoint()} — это dante внутри контейнера, отдельно поднимать не нужно.` });
-  try {
-    await invoke(COMMANDS.connect, { settings });
-    // dante уже внутри контейнера: обновляем индикатор прокси сразу после старта.
-    void refreshSocksStatus();
-  } catch (error) { setState('error'); appendLog({ level: 'error', message: error instanceof Error ? error.message : String(error) }); }
-}
-
-async function disconnect() {
-  setState('disconnecting'); appendLog({ level: 'info', message: 'Запрашиваю отключение…' });
-  try { await invoke(COMMANDS.disconnect); }
-  catch (error) { setState('error'); appendLog({ level: 'error', message: error instanceof Error ? error.message : String(error) }); }
-}
-
-async function pollRuntimeStatus() {
-  try {
-    const payload = await invoke<StatusPayload>(COMMANDS.status);
-    if (payload.portal) elements.detailPortal.textContent = payload.portal;
-    if (payload.connectedAt) connectedAt = payload.connectedAt;
-    if (!connectionOrchestrationActive || payload.state !== 'idle') setState(payload.state, payload.message);
-    if (payload.state === 'connected' || payload.state === 'idle' || payload.state === 'error') hidePrompt();
-  } catch { /* backend may be shutting down */ }
-}
-
-async function submitPrompt(event: SubmitEvent) {
-  event.preventDefault(); if (!activePrompt) return;
-  const values = Object.fromEntries(new FormData(elements.promptForm).entries());
-  const promptKind = activePrompt.fields?.[0]?.kind ?? activePrompt.kind;
-  const response = promptKind ? String(values[promptKind] ?? '') : '';
-  elements.promptSubmit.disabled = true;
-  try {
-    await invoke(COMMANDS.submitPrompt, { requestId: activePrompt.requestId, values });
-    if (promptKind === 'username') currentGpUsername = response;
-    if (promptKind === 'password') {
-      currentGpPassword = response;
-      if (elements.rememberCredentials.checked && currentGpUsername) {
-        await invoke(COMMANDS.credentialSave, { username: currentGpUsername, password: response });
-        savedCredential = { username: currentGpUsername, password: response };
-        appendLog({ level: 'success', message: 'Логин и пароль сохранены через Windows DPAPI.' });
-      } else if (!elements.rememberCredentials.checked) {
-        await invoke(COMMANDS.credentialDelete);
-        savedCredential = null;
-      }
+function error(message: unknown = '') { ui.error.textContent = String(message); ui.error.hidden = !message; }
+function render() {
+  const locked = snapshot.active || snapshot.cleanupRequired;
+  ui.settings.disabled = locked || busy || !ready;
+  ui.cancel.disabled = busy || !ready || snapshot.state === 'disconnecting';
+  ui.cancel.hidden = !snapshot.prompt;
+  ui.connect.disabled = ui.cancel.disabled || Boolean(snapshot.prompt && submittedPrompt === snapshot.prompt.requestId);
+  ui.connect.textContent = snapshot.state === 'disconnecting' ? 'Отключение…' : snapshot.prompt ? 'Продолжить' : snapshot.state === 'connected' || snapshot.cleanupRequired ? 'Отключить' : snapshot.active ? 'Отменить' : 'Подключить';
+  ui.status.dataset.state = snapshot.state;
+  ui.status.dataset.waiting = String(Boolean(snapshot.prompt));
+  ui.statusText.textContent = snapshot.state === 'error' ? 'Не удалось подключиться' : snapshot.message;
+  const p = snapshot.prompt;
+  ui.challenge.hidden = !p;
+  if (!p) { promptId = null; ui.responseControl.replaceChildren(); }
+  else if (promptId !== p.requestId) {
+    promptId = p.requestId;
+    ui.challengeLabel.textContent = p.message;
+    let control: HTMLInputElement | HTMLSelectElement;
+    if (p.choices.length) {
+      control = document.createElement('select');
+      for (const choice of p.choices) { const option = document.createElement('option'); option.value = choice; option.textContent = choice; control.append(option); }
+    } else {
+      control = document.createElement('input'); control.type = ['password', 'mfa', 'challenge'].includes(p.kind) ? 'password' : 'text';
+      control.autocomplete = p.kind === 'mfa' ? 'one-time-code' : 'off';
+      control.maxLength = 4096;
+      if (p.kind === 'username') control.value = ui.username.value;
     }
-    hidePrompt(); appendLog({ level: 'info', message: 'Ответ отправлен.' });
+    control.id = 'response'; control.required = true;
+    ui.responseControl.replaceChildren(control);
+    if (document.hasFocus() && !infoOpen) control.focus();
   }
-  catch (error) { appendLog({ level: 'error', message: error instanceof Error ? error.message : String(error) }); }
-  finally { elements.promptSubmit.disabled = false; }
 }
-
-async function cancelPrompt() { if (!activePrompt) return; try { await invoke(COMMANDS.cancel, { requestId: activePrompt.requestId }); } catch { /* backend may already have cancelled */ } hidePrompt(); setState('idle', 'Ввод отменён.'); appendLog({ level: 'warn', message: 'Аутентификация отменена.' }); }
-
-async function setupBridge() {
+function apply(next: Snapshot) {
+  if (next.revision < snapshot.revision) return;
+  const changed = next.revision !== snapshot.revision;
+  snapshot = next;
+  if (submittedPrompt !== next.prompt?.requestId) submittedPrompt = null;
+  if (changed) error(next.state === 'error' ? next.message : '');
+  render();
+}
+async function refresh() {
+  if (!ready || statusCheck) return;
+  statusCheck = true;
+  try { apply(await invoke<Snapshot>('vpn_status')); }
+  catch (e) { error(e); }
+  finally { statusCheck = false; }
+}
+async function checkSocks() {
+  if (!ready || socksCheck || snapshot.state !== 'connected') return;
+  socksCheck = true;
   try {
-    unlisteners = await Promise.all([
-      listen<StatusPayload>(EVENTS.status, ({ payload }) => {
-        if (payload.connectedAt) connectedAt = payload.connectedAt;
-        setState(payload.state, payload.message);
-        if (payload.portal) elements.detailPortal.textContent = payload.portal;
-        if (payload.state === 'connected' || payload.state === 'idle' || payload.state === 'error') hidePrompt();
-        void refreshSocksStatus();
-      }),
-      listen<LogPayload>(EVENTS.log, ({ payload }) => appendLog(payload)),
-      listen<PromptPayload>(EVENTS.prompt, ({ payload }) => { setState('connecting', payload.message ?? 'Ожидаем данные аутентификации.'); showPrompt(payload); }),
-    ]);
-  } catch (error) {
-    unlisteners = [];
-    appendLog({ level: 'warn', message: `События Tauri недоступны, продолжаю через polling: ${String(error)}` });
-  }
-  try { const payload = await invoke<StatusPayload>(COMMANDS.status); if (payload) { if (payload.portal) elements.detailPortal.textContent = payload.portal; if (payload.connectedAt) connectedAt = payload.connectedAt; setState(payload.state, payload.message); } }
-  catch { appendLog({ level: 'warn', message: 'Статус relay пока недоступен — можно попробовать подключиться.' }); }
-  try {
-    savedCredential = await invoke<SavedCredential | null>(COMMANDS.credentialLoad);
-    if (savedCredential) {
-      currentGpUsername = savedCredential.username;
-      elements.rememberCredentials.checked = true;
+    const result = await invoke<{ port: number; listening: boolean }>('socks_status');
+    if (snapshot.state === 'connected' && result.port === snapshot.socksPort) {
+      ui.statusText.textContent = result.listening ? snapshot.message : 'VPN подключён · прокси недоступен';
     }
-  }
-  catch (error) { appendLog({ level: 'warn', message: `Не удалось загрузить сохранённые креды: ${String(error)}` }); }
-  promptPollTimer = window.setInterval(async () => {
-    try {
-      const payload = await invoke<PromptPayload | null>(COMMANDS.currentPrompt);
-      if (payload && activePrompt?.requestId !== payload.requestId) showPrompt(payload);
-    } catch { /* transient backend shutdown */ }
-  }, 500);
-  statusPollTimer = window.setInterval(() => void pollRuntimeStatus(), 750);
-  socksPollTimer = window.setInterval(() => void refreshSocksStatus(), 3_000);
-  void refreshSocksStatus();
+  } finally { socksCheck = false; }
 }
-
-applySettings(readSettings());
-setState('idle');
-setSocksStatus({ state: 'stopped' });
-hidePrompt();
-elements.detailPortal.textContent = elements.portal.value || '—';
-elements.connect.addEventListener('click', () => void connect());
-elements.tabConnection.addEventListener('click', () => setActiveTab('connection'));
-elements.tabSettings.addEventListener('click', () => setActiveTab('settings'));
-elements.promptForm.addEventListener('submit', (event) => void submitPrompt(event));
-elements.promptCancel.addEventListener('click', () => void cancelPrompt());
-elements.clearLog.addEventListener('click', () => { elements.log.innerHTML = '<div class="log-empty" id="log-empty">Здесь появятся события подключения.</div>'; });
-elements.settingsForm.addEventListener('input', () => { saveSettings(); elements.detailPortal.textContent = elements.portal.value || '—'; });
-try { localStorage.removeItem('gp-relay.backend'); } catch { /* ок */ }
-window.addEventListener('beforeunload', () => {
-  unlisteners.forEach((unlisten) => unlisten());
-  if (promptPollTimer !== null) window.clearInterval(promptPollTimer);
-  if (statusPollTimer !== null) window.clearInterval(statusPollTimer);
-  if (socksPollTimer !== null) window.clearInterval(socksPollTimer);
+async function submitResponse() {
+  const p = snapshot.prompt;
+  const input = $<HTMLInputElement | HTMLSelectElement>('response');
+  if (!ready || busy || !p || submittedPrompt === p.requestId || !input || !input.reportValidity()) return;
+  const value = input.value;
+  submittedPrompt = p.requestId; render(); error();
+  try {
+    await invoke('vpn_submit_prompt', { requestId: p.requestId, value });
+    if (p.kind === 'username') { ui.username.value = value; saveSettings(); }
+    if (p.kind === 'password') ui.password.value = value;
+    input.value = '';
+  } catch (e) { error(e); if (submittedPrompt === p.requestId) submittedPrompt = null; render(); }
+}
+async function stopConnection() {
+  if (!ready || busy || snapshot.state === 'disconnecting') return;
+  busy = true; render();
+  try { await invoke('vpn_disconnect'); await refresh(); } catch (e) { error(e); }
+  finally { busy = false; render(); }
+}
+ui.form.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!ready || busy) return;
+  if (snapshot.prompt) { await submitResponse(); return; }
+  if (snapshot.active || snapshot.cleanupRequired) {
+    await stopConnection(); return;
+  }
+  if (!ui.form.reportValidity()) return;
+  busy = true; render(); error(); saveSettings();
+  try {
+    await invoke('vpn_connect', { settings: { portal: settings.portal, socksPort: Number(ui.port.value) },
+      auth: { username: ui.username.value.trim(), password: ui.password.value, rememberPassword: ui.remember.checked } });
+    await refresh();
+  } catch (e) { error(e); }
+  finally { busy = false; render(); }
 });
-void setupBridge();
+ui.cancel.addEventListener('click', () => void stopConnection());
+ui.responseControl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); void submitResponse(); } });
+ui.reveal.addEventListener('click', () => {
+  const show = ui.password.type === 'password'; ui.password.type = show ? 'text' : 'password';
+  ui.reveal.setAttribute('aria-pressed', String(show)); ui.reveal.setAttribute('aria-label', show ? 'Скрыть пароль' : 'Показать пароль');
+});
+ui.username.addEventListener('input', saveSettings);
+ui.port.addEventListener('input', saveSettings);
+ui.remember.addEventListener('change', async () => { if (!ui.remember.checked) { try { await invoke('credential_delete'); } catch(e) { error(e); } } });
+function hidePanel() { void invoke('panel_hide').catch(error); }
+function toggleInfo(open: boolean) {
+  infoOpen = open;
+  $('app-info').hidden = !open;
+  ui.form.hidden = open;
+  $('show-info').setAttribute('aria-expanded', String(open));
+  const port = snapshot.active ? snapshot.socksPort : Number(ui.port.value);
+  $('info-proxy').textContent = `socks5h://127.0.0.1:${Number.isInteger(port) && port > 0 && port <= 65535 ? port : 1080}`;
+  window.scrollTo(0, 0);
+  (open ? $('info-title') : snapshot.prompt ? $('response') : $('show-info'))?.focus({preventScroll: true});
+}
+$('show-info').addEventListener('click', () => toggleInfo(!infoOpen));
+$('close-info').addEventListener('click', () => toggleInfo(false));
+$('hide-panel').addEventListener('click', hidePanel);
+window.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); hidePanel(); } });
+window.addEventListener('focus', () => { void refresh(); });
+window.addEventListener('blur', () => { ui.password.type = 'password'; ui.reveal.setAttribute('aria-pressed','false'); ui.reveal.setAttribute('aria-label','Показать пароль'); });
+const settings = readSettings();
+ui.username.value = settings.username; ui.port.value = String(settings.socksPort);
+let lastHeight = 0;
+const observer = new ResizeObserver(() => {
+  const height = Math.ceil(ui.panel.getBoundingClientRect().height);
+  if (ready && height !== lastHeight) { lastHeight = height; void invoke('panel_resize', { height }).catch(() => {}); }
+});
+observer.observe(ui.panel);
+async function setup() {
+  try {
+    await listen<Snapshot>('vpn://status', ({payload}) => apply(payload));
+    await listen('panel://shown', () => {
+      void refresh(); void checkSocks().catch(() => {});
+      const target = infoOpen ? $('info-title') : snapshot.prompt ? $('response') : ui.username.value ? ui.password.value ? ui.connect : ui.password : ui.username;
+      if (document.hasFocus()) target?.focus();
+    });
+    let credentialError: unknown;
+    try {
+      const credential = await invoke<Credential | null>('credential_load');
+      if (credential && (!credential.portal || credential.portal === settings.portal)) {
+        ui.username.value = credential.username; ui.password.value = credential.password;
+        ui.remember.checked = true;
+      }
+    } catch (e) { credentialError = e; }
+    ready = true;
+    await refresh();
+    if (credentialError) error('Не удалось прочитать сохранённый пароль. Введите его заново.');
+    await invoke('panel_resize', { height: Math.ceil(ui.panel.getBoundingClientRect().height) });
+  } catch (e) { error(e); }
+  render();
+}
+void setup();
+window.setInterval(() => { if (document.hasFocus()) { void refresh(); void checkSocks().catch(() => {}); } }, 2000);

@@ -42,7 +42,16 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ""
 
-      - name: Build portable kit (single exe + README + checksums)
+      - name: Test Rust backend
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Install browser for UI tests
+        run: pnpm exec playwright install chromium
+
+      - name: Test compact panel
+        run: pnpm exec playwright test
+
+      - name: Build portable kit (exe + runtime files + README + checksums)
         shell: pwsh
         run: |
           & "$env:GITHUB_WORKSPACE\scripts\build-portable.ps1" -Zip

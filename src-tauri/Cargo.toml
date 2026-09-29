@@ -1,6 +1,6 @@
 [package]
 name = "globalprotect-remote-gui"
-version = "0.2.0"
+version = "0.2.5"
 description = "Windows GUI controller for a remote OpenConnect GlobalProtect session"
 authors = ["GlobalProtect Remote GUI"]
 edition = "2021"
@@ -11,7 +11,7 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [lib]
 name = "globalprotect_remote_gui_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -21,5 +21,6 @@ base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tar = "0.4"
-tauri = { version = "2", features = [] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Threading"] }
+tauri = { version = "=2.12.0", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }

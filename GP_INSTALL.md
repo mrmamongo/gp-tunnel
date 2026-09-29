@@ -1,33 +1,19 @@
 # OpenConnect для GlobalProtect
 
-## Current status
+Relay работает в контейнере `gp-relay`: Alpine + OpenConnect + Dante + socat.
+Приложение получает образ самостоятельно при нажатии «Подключить».
 
-- Relay: контейнер `gp-relay` (Alpine + openconnect + dante + sshd).
-- Доступность корпоративного портала проверена по HTTPS из контейнера.
-- OpenConnect 9.12 (Alpine package) стоит в образе `ghcr.io/mrmamongo/gp-relay:latest`.
-- Подключение запускается в foreground внутри контейнера через `docker exec` + PTY;
-  логин, пароль, OTP/passcode и выбор authgroup/gateway вводятся в GUI.
-
-## Установка
-
-```bash
+```powershell
 docker pull ghcr.io/mrmamongo/gp-relay:latest
 ```
 
-openconnect и `vpnc-script` уже входят в образ; отдельная установка не нужна.
-При сборке образа из исходников используется `docker/Dockerfile`.
+Для ручной диагностики отдельного контейнера:
 
-## Ручная проверка
-
-```bash
-docker run --rm -it --cap-add=NET_ADMIN --device=/dev/net/tun \
-  ghcr.io/mrmamongo/gp-relay:latest openconnect --version
+```powershell
+docker run -d --name gp-relay --cap-add=NET_ADMIN --device=/dev/net/tun -p 127.0.0.1:1080:1080 --restart unless-stopped ghcr.io/mrmamongo/gp-relay:latest
 docker exec -it gp-relay openconnect --protocol=gp gp.domru.ru
 ```
 
-В GUI достаточно указать портал (`gp.domru.ru`) и нажать «Подключить»: GUI сам
-проверит и поднимет контейнер. Кнопка «Отключить» посылает `Ctrl-C`
-foreground-процессу OpenConnect внутри PTY контейнера.
+Завершите ручную сессию до подключения через GUI. Панель открывается по значку в трее; закрытие панели сохраняет VPN, команда «Выйти» отключает его. Порт SOCKS выбирается до подключения, внутри контейнера остаётся `1080`.
 
-Подключение к корпоративному порталу не выполняется автоматически во время
-установки или сборки.
+Установка и сборка не выполняют подключение к корпоративному порталу.
