@@ -30,6 +30,33 @@
 
 Системные маршруты и прокси Windows не изменяются. Поддерживается один портал и одна VPN-сессия. SAML, автоподключение и автозапуск Windows не реализованы. При оставшейся сессии от старой версии сначала завершите её вручную; приложение не присваивает и не пересоздаёт контейнер с работающим OpenConnect.
 
+## MCP-сервер и CLI
+
+Каталог `mcp/` содержит MCP-сервер `gp` и консольную утилиту `gp` — обе управляют тем же туннелем, что и GUI, и используют тот же интерактивный путь (`docker exec` + socat PTY + openconnect).
+
+- `mcp/gp.py` — CLI: `status`, `connect`, `disconnect`, `check`, `answer`. Обёртка `gp.cmd` позволяет вызывать `gp <команда>`, если добавить `mcp/` в PATH.
+- `mcp/server.py` — MCP-сервер (`mcp.server.mcpserver`) с тулзами `gp_status`, `gp_connect`, `gp_disconnect`, `gp_check`.
+- `mcp/gp_driver.py` — драйвер сессии: владеет `docker exec`-процессом и живёт, пока жив туннель. Публикует состояние в `gp-session.json` и ждёт ответов в `gp-response.json`.
+- `mcp/gp_core.py` — общий код: Docker-пробы, DPAPI-расшифровка `credentials.json`, парсер промптов openconnect (порт `src-tauri/src/protocol.rs`), SOCKS5-клиент без внешних зависимостей.
+
+Подключение интерактивное: логин и пароль подставляются автоматически из хранилища GUI (пароль расшифровывается через Windows DPAPI), шлюз выбирается сам (`gpm.domru.ru` по умолчанию, переопределяется параметром или `GP_GATEWAY`). Одноразовый код MCP не знает и не придумывает: `gp_connect` возвращает `state: prompt` с текстом запроса — агент спрашивает пользователя и вызывает `gp_connect` повторно с `otp="<код>"`. В CLI код спрашивается на терминале; для фоновой сессии (`gp connect --detach`) ответ передаётся командой `gp answer <код>`.
+
+Требования: Python 3.10+ и пакет `mcp` (`pip install -r mcp/requirements.txt`) — только для MCP-сервера, CLI работает на голом stdlib. Креды читаются из `%APPDATA%/com.globalprotect.remote-gui/credentials.json`: подключитесь один раз в GUI с «Запомнить пароль» либо задайте `GP_USERNAME`/`GP_PASSWORD`. Состояние и лог сессии — `gp-session.json`/`gp-session.log` в том же каталоге (переопределяется `GP_SESSION_DIR`).
+
+Регистрация в Hermes (`config.yaml`, секция `mcp_servers`):
+
+```yaml
+mcp_servers:
+  gp:
+    command: C:/path/to/python.exe
+    args:
+      - C:/Work/globalprotect-remote-gui/mcp/server.py
+    timeout: 120
+    connect_timeout: 30
+```
+
+Отключение (`gp_disconnect` / `gp disconnect`) повторяет логику GUI: Ctrl-C через драйвер сессии, затем `pkill -INT openconnect` в контейнере, в крайнем случае `docker rm -f gp-relay`. Завершение подтверждается проверкой процесса внутри контейнера.
+
 ## Разработка
 
 Нужны Node.js, pnpm, Rust и Windows build tools, WebView2. Для интеграционных проверок нужен работающий Docker Desktop.
